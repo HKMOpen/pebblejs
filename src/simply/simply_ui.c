@@ -7,7 +7,9 @@
 #include "simply.h"
 
 #include "util/graphics.h"
+#include "util/math.h"
 #include "util/string.h"
+#include "util/window.h"
 
 #include <pebble.h>
 
@@ -40,6 +42,36 @@ static SimplyStyle STYLES[] = {
     .subtitle_font = FONT_KEY_GOTHIC_18_BOLD,
     .custom_body_font_id = RESOURCE_ID_MONO_FONT_14,
   },
+};
+
+typedef struct CardClearPacket CardClearPacket;
+
+struct __attribute__((__packed__)) CardClearPacket {
+  Packet packet;
+  uint8_t flags;
+};
+
+typedef struct CardTextPacket CardTextPacket;
+
+struct __attribute__((__packed__)) CardTextPacket {
+  Packet packet;
+  uint8_t index;
+  char text[];
+};
+
+typedef struct CardImagePacket CardImagePacket;
+
+struct __attribute__((__packed__)) CardImagePacket {
+  Packet packet;
+  uint32_t image;
+  uint8_t index;
+};
+
+typedef struct CardStylePacket CardStylePacket;
+
+struct __attribute__((__packed__)) CardStylePacket {
+  Packet packet;
+  uint8_t style;
 };
 
 void simply_ui_clear(SimplyUi *self, uint32_t clear_mask) {
@@ -123,18 +155,29 @@ static void layer_update_callback(Layer *layer, GContext *ctx) {
   GBitmap *body_image = simply_res_get_image(
       self->window.simply->res, self->ui_layer.imagefields[UiBodyImage]);
 
+  GRect title_icon_bounds;
+  GRect subtitle_icon_bounds;
+  GRect body_image_bounds;
+
+  if (title_icon) {
+    title_icon_bounds = gbitmap_get_bounds(title_icon);
+  }
+  if (subtitle_icon) {
+    subtitle_icon_bounds = gbitmap_get_bounds(title_icon);
+  }
+
   if (has_title) {
     GRect title_frame = text_frame;
     if (title_icon) {
-      title_frame.origin.x += title_icon->bounds.size.w;
-      title_frame.size.w -= title_icon->bounds.size.w;
+      title_frame.origin.x += title_icon_bounds.size.w;
+      title_frame.size.w -= title_icon_bounds.size.w;
     }
     title_size = graphics_text_layout_get_content_size(title_text,
         title_font, title_frame, GTextOverflowModeWordWrap, GTextAlignmentLeft);
     title_size.w = title_frame.size.w;
     title_pos = cursor;
     if (title_icon) {
-      title_pos.x += title_icon->bounds.size.w;
+      title_pos.x += title_icon_bounds.size.w;
     }
     cursor.y += title_size.h;
   }
@@ -142,22 +185,23 @@ static void layer_update_callback(Layer *layer, GContext *ctx) {
   if (has_subtitle) {
     GRect subtitle_frame = text_frame;
     if (subtitle_icon) {
-      subtitle_frame.origin.x += subtitle_icon->bounds.size.w;
-      subtitle_frame.size.w -= subtitle_icon->bounds.size.w;
+      subtitle_frame.origin.x += subtitle_icon_bounds.size.w;
+      subtitle_frame.size.w -= subtitle_icon_bounds.size.w;
     }
     subtitle_size = graphics_text_layout_get_content_size(subtitle_text,
         title_font, subtitle_frame, GTextOverflowModeWordWrap, GTextAlignmentLeft);
     subtitle_size.w = subtitle_frame.size.w;
     subtitle_pos = cursor;
     if (subtitle_icon) {
-      subtitle_pos.x += subtitle_icon->bounds.size.w;
+      subtitle_pos.x += subtitle_icon_bounds.size.w;
     }
     cursor.y += subtitle_size.h;
   }
 
   if (body_image) {
+    body_image_bounds = gbitmap_get_bounds(body_image);
     image_pos = cursor;
-    cursor.y += body_image->bounds.size.h;
+    cursor.y += body_image_bounds.size.h;
   }
 
   if (has_body) {
@@ -181,15 +225,13 @@ static void layer_update_callback(Layer *layer, GContext *ctx) {
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, frame, 0, GCornerNone);
 
-  if (self->window.background_color == GColorWhite) {
-    graphics_context_set_fill_color(ctx, GColorWhite);
-    graphics_fill_rect(ctx, frame, 4, GCornersAll);
-  }
+  graphics_context_set_fill_color(ctx, GColor8GetOr(self->window.background_color, GColorWhite));
+  graphics_fill_rect(ctx, frame, 4, GCornersAll);
 
   if (title_icon) {
     GRect icon_frame = (GRect) {
       .origin = { margin_x, title_pos.y + image_offset_y },
-      .size = { title_icon->bounds.size.w, title_size.h }
+      .size = { title_icon_bounds.size.w, title_size.h }
     };
     graphics_draw_bitmap_centered(ctx, title_icon, icon_frame);
   }
@@ -202,7 +244,7 @@ static void layer_update_callback(Layer *layer, GContext *ctx) {
   if (subtitle_icon) {
     GRect subicon_frame = (GRect) {
       .origin = { margin_x, subtitle_pos.y + image_offset_y },
-      .size = { subtitle_icon->bounds.size.w, subtitle_size.h }
+      .size = { subtitle_icon_bounds.size.w, subtitle_size.h }
     };
     graphics_draw_bitmap_centered(ctx, subtitle_icon, subicon_frame);
   }
@@ -215,7 +257,7 @@ static void layer_update_callback(Layer *layer, GContext *ctx) {
   if (body_image) {
     GRect image_frame = (GRect) {
       .origin = { 0, image_pos.y + image_offset_y },
-      .size = { window_frame.size.w, body_image->bounds.size.h }
+      .size = { window_frame.size.w, body_image_bounds.size.h }
     };
     graphics_draw_bitmap_centered(ctx, body_image, image_frame);
   }
@@ -273,12 +315,51 @@ static void window_unload(Window *window) {
   simply_window_unload(&self->window);
 }
 
+static void handle_card_clear_packet(Simply *simply, Packet *data) {
+  CardClearPacket *packet = (CardClearPacket*) data;
+  simply_ui_clear(simply->ui, packet->flags);
+}
+
+static void handle_card_text_packet(Simply *simply, Packet *data) {
+  CardTextPacket *packet = (CardTextPacket*) data;
+  simply_ui_set_text(simply->ui, MIN(NumUiTextfields - 1, packet->index), packet->text);
+}
+
+static void handle_card_image_packet(Simply *simply, Packet *data) {
+  CardImagePacket *packet = (CardImagePacket*) data;
+  simply->ui->ui_layer.imagefields[MIN(NumUiImagefields - 1, packet->index)] = packet->image;
+  window_stack_schedule_top_window_render();
+}
+
+static void handle_card_style_packet(Simply *simply, Packet *data) {
+  CardStylePacket *packet = (CardStylePacket*) data;
+  simply_ui_set_style(simply->ui, packet->style);
+}
+
+bool simply_ui_handle_packet(Simply *simply, Packet *packet) {
+  switch (packet->type) {
+    case CommandCardClear:
+      handle_card_clear_packet(simply, packet);
+      return true;
+    case CommandCardText:
+      handle_card_text_packet(simply, packet);
+      return true;
+    case CommandCardImage:
+      handle_card_image_packet(simply, packet);
+      return true;
+    case CommandCardStyle:
+      handle_card_style_packet(simply, packet);
+      return true;
+  }
+  return false;
+}
+
 SimplyUi *simply_ui_create(Simply *simply) {
   SimplyUi *self = malloc(sizeof(*self));
   *self = (SimplyUi) { .window.layer = NULL };
 
   simply_window_init(&self->window, simply);
-  simply_window_set_background_color(&self->window, GColorWhite);
+  simply_window_set_background_color(&self->window, GColor8White);
 
   window_set_user_data(self->window.window, self);
   window_set_window_handlers(self->window.window, (WindowHandlers) {

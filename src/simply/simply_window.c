@@ -13,7 +13,59 @@
 
 #include <pebble.h>
 
+typedef struct WindowPropsPacket WindowPropsPacket;
+
+struct __attribute__((__packed__)) WindowPropsPacket {
+  Packet packet;
+  uint32_t id;
+  GColor8 background_color;
+  bool fullscreen;
+  bool scrollable;
+};
+
+typedef struct WindowButtonConfigPacket WindowButtonConfigPacket;
+
+struct __attribute__((__packed__)) WindowButtonConfigPacket {
+  Packet packet;
+  uint8_t button_mask;
+};
+
+typedef struct WindowActionBarPacket WindowActionBarPacket;
+
+struct __attribute__((__packed__)) WindowActionBarPacket {
+  Packet packet;
+  uint32_t image[3];
+  bool action;
+  GColor8 background_color;
+};
+
+typedef struct ClickPacket ClickPacket;
+
+struct __attribute__((__packed__)) ClickPacket {
+  Packet packet;
+  ButtonId button:8;
+};
+
+typedef ClickPacket LongClickPacket;
+
 static void click_config_provider(void *data);
+
+static bool send_click(SimplyMsg *self, Command type, ButtonId button) {
+  ClickPacket packet = {
+    .packet.type = type,
+    .packet.length = sizeof(packet),
+    .button = button,
+  };
+  return simply_msg_send_packet(&packet.packet);
+}
+
+static bool send_single_click(SimplyMsg *self, ButtonId button) {
+  return send_click(self, CommandClick, button);
+}
+
+static bool send_long_click(SimplyMsg *self, ButtonId button) {
+  return send_click(self, CommandLongClick, button);
+}
 
 static void set_scroll_layer_click_config(SimplyWindow *self) {
   if (!self->scroll_layer) {
@@ -78,7 +130,7 @@ void simply_window_set_fullscreen(SimplyWindow *self, bool is_fullscreen) {
   self->id = id;
 }
 
-void simply_window_set_background_color(SimplyWindow *self, GColor background_color) {
+void simply_window_set_background_color(SimplyWindow *self, GColor8 background_color) {
   self->background_color = background_color;
 }
 
@@ -116,12 +168,12 @@ void simply_window_set_action_bar_icon(SimplyWindow *self, ButtonId button, uint
   }
 }
 
-void simply_window_set_action_bar_background_color(SimplyWindow *self, GColor background_color) {
+void simply_window_set_action_bar_background_color(SimplyWindow *self, GColor8 background_color) {
   if (!self->action_bar_layer) {
     return;
   }
 
-  action_bar_layer_set_background_color(self->action_bar_layer, background_color);
+  action_bar_layer_set_background_color(self->action_bar_layer, GColor8Get(background_color));
   simply_window_set_action_bar(self, true);
 }
 
@@ -154,7 +206,7 @@ void simply_window_single_click_handler(ClickRecognizerRef recognizer, void *con
     }
   }
   if (is_enabled) {
-    simply_msg_single_click(self->simply->msg, button);
+    send_single_click(self->simply->msg, button);
   }
 }
 
@@ -163,7 +215,7 @@ static void long_click_handler(ClickRecognizerRef recognizer, void *context) {
   ButtonId button = click_recognizer_get_button_id(recognizer);
   bool is_enabled = (self->button_mask & (1 << button));
   if (is_enabled) {
-    simply_msg_long_click(self->simply->msg, button);
+    send_long_click(self->simply->msg, button);
   }
 }
 
@@ -200,6 +252,55 @@ void simply_window_load(SimplyWindow *self) {
 void simply_window_unload(SimplyWindow *self) {
   scroll_layer_destroy(self->scroll_layer);
   self->scroll_layer = NULL;
+}
+
+static void handle_window_props_packet(Simply *simply, Packet *data) {
+  WindowPropsPacket *packet = (WindowPropsPacket*) data;
+  SimplyWindow *window = simply_window_stack_get_top_window(simply);
+  if (!window) {
+    return;
+  }
+  window->id = packet->id;
+  simply_window_set_background_color(window, packet->background_color);
+  simply_window_set_fullscreen(window, packet->fullscreen);
+  simply_window_set_scrollable(window, packet->scrollable);
+}
+
+static void handle_window_button_config_packet(Simply *simply, Packet *data) {
+  WindowButtonConfigPacket *packet = (WindowButtonConfigPacket*) data;
+  SimplyWindow *window = simply_window_stack_get_top_window(simply);
+  if (!window) {
+    return;
+  }
+  window->button_mask = packet->button_mask;
+}
+
+static void handle_window_action_bar_packet(Simply *simply, Packet *data) {
+  WindowActionBarPacket *packet = (WindowActionBarPacket*) data;
+  SimplyWindow *window = simply_window_stack_get_top_window(simply);
+  if (!window) {
+    return;
+  }
+  simply_window_set_action_bar_background_color(window, packet->background_color);
+  for (unsigned int i = 0; i < ARRAY_LENGTH(packet->image); ++i) {
+    simply_window_set_action_bar_icon(window, i + 1, packet->image[i]);
+  }
+  simply_window_set_action_bar(window, packet->action);
+}
+
+bool simply_window_handle_packet(Simply *simply, Packet *packet) {
+  switch (packet->type) {
+    case CommandWindowProps:
+      handle_window_props_packet(simply, packet);
+      return true;
+    case CommandWindowButtonConfig:
+      handle_window_button_config_packet(simply, packet);
+      return true;
+    case CommandWindowActionBar:
+      handle_window_action_bar_packet(simply, packet);
+      return true;
+  }
+  return false;
 }
 
 SimplyWindow *simply_window_init(SimplyWindow *self, Simply *simply) {
